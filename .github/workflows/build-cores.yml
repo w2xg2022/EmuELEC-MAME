@@ -1,0 +1,88 @@
+name: Build MAME cores
+
+on:
+  workflow_dispatch:
+    inputs:
+      emuelec_ref:
+        description: 'w2xg2022/EmuELEC的commit/branch/tag(留空用main最新)'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write
+
+env:
+  PROJECT: Amlogic-ce
+  DEVICE: Amlogic-no
+  SUBDEVICE: X98mini
+  ARCH: aarch64
+  DISTRO: EmuELEC
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 512
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Clone w2xg2022/EmuELEC
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.emuelec_ref }}" \
+            https://github.com/w2xg2022/EmuELEC.git emuelec-src
+          echo "EMUELEC_SHA=$(cd emuelec-src && git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            gcc make git unzip wget xz-utils libsdl2-dev libsdl2-mixer-dev \
+            libfreeimage-dev libfreetype6-dev libcurl4-openssl-dev rapidjson-dev \
+            libasound2-dev libgl1-mesa-dev build-essential libboost-all-dev cmake \
+            fonts-droid-fallback libvlc-dev libvlccore-dev vlc-bin texinfo premake4 \
+            golang libssl-dev curl patchelf xmlstarlet default-jre xsltproc \
+            libvpx-dev rdfind tzdata xfonts-utils lzop \
+            libparse-yapp-perl gperf libxml-parser-perl patchutils
+
+      - name: Build mame2003-plus + mame2010 (toolchain自动作为依赖编译)
+        working-directory: emuelec-src
+        run: |
+          set -o pipefail
+          PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
+          ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
+            ./scripts/build mame2003-plus:target 2>&1 | tee ../build-mame2003-plus.log
+          PROJECT=${{ env.PROJECT }} DEVICE=${{ env.DEVICE }} SUBDEVICE=${{ env.SUBDEVICE }} \
+          ARCH=${{ env.ARCH }} DISTRO=${{ env.DISTRO }} \
+            ./scripts/build mame2010:target 2>&1 | tee ../build-mame2010.log
+
+      - name: 收集.so产物
+        run: |
+          mkdir -p out
+          find emuelec-src -iname 'mame2003_plus_libretro.so' -exec cp -v {} out/ \;
+          find emuelec-src -iname 'mame2010_libretro.so' -exec cp -v {} out/ \;
+          ls -la out/
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build-mame*.log
+          retention-days: 14
+
+      - name: Create release
+        if: success()
+        run: |
+          gh release create "cores-${EMUELEC_SHA}" out/*.so \
+            --title "MAME cores (built against EmuELEC@${EMUELEC_SHA})" \
+            --notes "预编译mame2003-plus/mame2010的libretro核心.so,对应w2xg2022/EmuELEC commit ${EMUELEC_SHA}的工具链ABI。"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
